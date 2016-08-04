@@ -353,6 +353,18 @@ static inline struct inode *file_inode(const struct file *f)
 #endif /* HAVE_FILE_INODE */
 
 /*
+ * 4.1 API change
+ * struct access file->f_path.dentry was replaced by accessor function
+ * file_dentry(f)
+ */
+#ifndef HAVE_FILE_DENTRY
+static inline struct dentry *file_dentry(const struct file *file)
+{
+	return f->f_path.dentry;
+}
+#endif /* HAVE_FILE_DENTRY */
+
+/*
  * 2.6.38 API change
  */
 #ifdef HAVE_FOLLOW_DOWN_ONE
