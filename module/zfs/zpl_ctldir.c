@@ -52,7 +52,7 @@ zpl_common_open(struct inode *ip, struct file *filp)
 static int
 zpl_root_iterate(struct file *filp, struct dir_context *ctx)
 {
-	zfs_sb_t *zsb = ITOZSB(filp->f_path.dentry->d_inode);
+	zfs_sb_t *zsb = ITOZSB(file_inode(filp));
 	int error = 0;
 
 	ZFS_ENTER(zsb);
@@ -247,7 +247,7 @@ zpl_snapdir_lookup(struct inode *dip, struct dentry *dentry,
 static int
 zpl_snapdir_iterate(struct file *filp, struct dir_context *ctx)
 {
-	zfs_sb_t *zsb = ITOZSB(filp->f_path.dentry->d_inode);
+	zfs_sb_t *zsb = ITOZSB(file_inode(filp));
 	fstrans_cookie_t cookie;
 	char snapname[MAXNAMELEN];
 	boolean_t case_conflict;
@@ -443,7 +443,7 @@ zpl_shares_iterate(struct file *filp, struct dir_context *ctx)
 {
 	fstrans_cookie_t cookie;
 	cred_t *cr = CRED();
-	zfs_sb_t *zsb = ITOZSB(filp->f_path.dentry->d_inode);
+	zfs_sb_t *zsb = ITOZSB(file_inode(filp));
 	znode_t *dzp;
 	int error = 0;
 
