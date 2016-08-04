@@ -815,12 +815,17 @@ zpl_compat_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 }
 #endif /* CONFIG_COMPAT */
 
+static ssize_t
+zpl_direct_IO(struct kiocb *kiocb, struct iov_iter *from, loff_t pos) {
+    return (zpl_iter_write(kiocb, from));
+}
 
 const struct address_space_operations zpl_address_space_operations = {
 	.readpages	= zpl_readpages,
 	.readpage	= zpl_readpage,
 	.writepage	= zpl_writepage,
 	.writepages	= zpl_writepages,
+        .direct_IO      = zpl_direct_IO,
 };
 
 const struct file_operations zpl_file_operations = {
