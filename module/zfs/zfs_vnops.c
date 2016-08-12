@@ -548,6 +548,8 @@ zfs_read(struct inode *ip, uio_t *uio, int ioflag, cred_t *cr)
 		}
 
 		n -= nbytes;
+		if (!zsb->z_issnap && zsb->z_throttle)
+		     zfs_do_throttle(zsb->z_throttle, false, nbytes);
 	}
 out:
 	zfs_range_unlock(rl);
@@ -909,6 +911,10 @@ zfs_write(struct inode *ip, uio_t *uio, int ioflag, cred_t *cr)
 
 		if (!xuio && n > 0)
 			uio_prefaultpages(MIN(n, max_blksz), uio);
+
+                if (zsb->z_throttle){
+                     zfs_do_throttle(zsb->z_throttle, true, nbytes);
+                }
 	}
 
 	zfs_inode_update(zp);
@@ -4046,6 +4052,9 @@ zfs_putpage(struct inode *ip, struct page *pp, struct writeback_control *wbc)
 		return (0);
 	}
 
+	if (zsb->z_throttle)
+	     zfs_do_throttle(zsb->z_throttle, true, pglen);
+
 	/*
 	 * Counterpart for redirty_page_for_writepage() above.  This page
 	 * was in fact not skipped and should not be counted as if it were.
@@ -4279,6 +4288,9 @@ zfs_fillpage(struct inode *ip, struct page *pl[], int nr_pages)
 	page_idx = 0;
 	for (total = io_off + io_len; io_off < total; io_off += PAGESIZE) {
 		caddr_t va;
+
+		if (!zsb->z_issnap && zsb->z_throttle && zsb->z_throttle->is_enabled)
+			zfs_do_throttle(zsb->z_throttle, false, PAGESIZE);
 
 		cur_pp = pl[page_idx++];
 		va = kmap(cur_pp);

@@ -443,6 +443,19 @@ zfs_prop_init(void)
 	    UINT64_MAX, PROP_DEFAULT, ZFS_TYPE_FILESYSTEM | ZFS_TYPE_VOLUME,
 	    "<count>", "SSCOUNT");
 
+	zprop_register_number(ZFS_PROP_WRITE_BYTES_SEC, "write_bytes_sec",
+		0, PROP_DEFAULT, ZFS_TYPE_FILESYSTEM,
+		"<bytes>", "WRITE_BYTES_SEC");
+	zprop_register_number(ZFS_PROP_READ_BYTES_SEC, "read_bytes_sec",
+			0, PROP_DEFAULT, ZFS_TYPE_FILESYSTEM,
+			"<bytes>", "READ_BYTES_SEC");
+	zprop_register_number(ZFS_PROP_WRITE_IOPS_SEC, "write_iops_sec",
+			0, PROP_DEFAULT, ZFS_TYPE_FILESYSTEM,
+			"<iops>", "WRITE_IOPS_SEC");
+	zprop_register_number(ZFS_PROP_READ_IOPS_SEC, "read_iops_sec",
+			0, PROP_DEFAULT, ZFS_TYPE_FILESYSTEM,
+			"<iops>", "READ_IOPS_SEC");
+
 	/* inherit number properties */
 	zprop_register_number(ZFS_PROP_RECORDSIZE, "recordsize",
 	    SPA_OLD_MAXBLOCKSIZE, PROP_INHERIT,

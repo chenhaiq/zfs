@@ -452,6 +452,44 @@ typedef struct zfsdev_state {
 	void			*zs_zevent;	/* zevent data */
 } zfsdev_state_t;
 
+struct semaphore;                              /* linux/semaphore.h */
+
+/*
+ * Used for io_serviced kstat.
+ */
+typedef struct io_serviced {
+	kstat_named_t read_bytes;
+	kstat_named_t write_bytes;
+	kstat_named_t read_iops;
+	kstat_named_t write_iops;
+} io_serviced_t;
+
+typedef struct zfs_throttle {
+   struct semaphore        z_sem_read;
+   struct semaphore        z_sem_write;
+   struct semaphore        *z_sem_real_read;
+   struct semaphore        *z_sem_real_write;
+   uint64_t                z_prop_read_bytes;
+   uint64_t                z_prop_write_bytes;
+   uint64_t                z_prop_read_iops;
+   uint64_t                z_prop_write_iops;
+   atomic_t                z_real_read_bytes;
+   atomic_t                z_real_write_bytes;
+   atomic_t                z_real_read_iops;
+   atomic_t                z_real_write_iops;
+   uint64_t                z_read_timestamp;
+   uint64_t                z_write_timestamp;
+   kstat_t                 *z_kstat;
+   io_serviced_t           *z_io_serviced;
+   bool                    is_enabled;
+   char                   fsname[MAXNAMELEN];
+   struct list_head       list;
+} zfs_throttle_t;
+
+extern uint64_t now(void);
+extern int zfs_throttle_find_zt(const char *fsname, zfs_throttle_t **zt);
+extern int zfs_throttle_create_zt(const char *fsname, void *arg);
+
 extern void *zfsdev_get_state(minor_t minor, enum zfsdev_state_type which);
 extern int zfsdev_getminor(struct file *filp, minor_t *minorp);
 extern minor_t zfsdev_minor_alloc(void);

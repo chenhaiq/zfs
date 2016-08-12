@@ -1372,6 +1372,12 @@ zfs_domount(struct super_block *sb, zfs_mntopts_t *zmo, int silent)
 	} else {
 		if ((error = zfs_sb_setup(zsb, B_TRUE)))
 			goto out;
+		if (zfs_throttle_find_zt(osname, &(zsb->z_throttle))) {
+			error = zfs_throttle_create_zt(osname, NULL);
+			if (error)
+				goto out;
+			zfs_throttle_find_zt(osname, &(zsb->z_throttle));
+		}
 	}
 
 	/* Allocate a root inode for the filesystem. */

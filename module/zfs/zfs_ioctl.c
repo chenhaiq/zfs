@@ -187,6 +187,8 @@
 #include <sys/zfeature.h>
 
 #include <linux/miscdevice.h>
+#include <linux/list.h>
+#include <linux/semaphore.h>
 #include <linux/slab.h>
 
 #include "zfs_namecheck.h"
@@ -209,6 +211,8 @@ extern void zfs_fini(void);
 uint_t zfs_fsyncer_key;
 extern uint_t rrw_tsd_key;
 static uint_t zfs_allow_log_key;
+
+zfs_throttle_t zfs_throttle_list;
 
 typedef int zfs_ioc_legacy_func_t(zfs_cmd_t *);
 typedef int zfs_ioc_func_t(const char *, nvlist_t *, nvlist_t *);
@@ -1519,6 +1523,128 @@ zfs_ioc_pool_destroy(zfs_cmd_t *zc)
 	return (error);
 }
 
+int zfs_throttle_create_zt(const char *fsname, void *arg) {
+	zfs_throttle_t *zt = kmem_zalloc(sizeof (zfs_throttle_t), KM_SLEEP);
+	uint64_t rate;
+	int error;
+	kstat_t *ksp;
+	char stat_name[KSTAT_STRLEN];
+	io_serviced_t *io_serviced = kmem_zalloc(sizeof (io_serviced_t), KM_SLEEP);
+	char dp_name[MAXNAMELEN];
+	char *ds_name;
+
+	ds_name = strchr(fsname, '/');
+	if (ds_name == NULL) {
+		// datapool has no throttle
+		return (0);
+	}
+	ds_name++; // skip "/"
+	(void) strlcpy(dp_name, fsname, ds_name - fsname);
+
+	(void) strcpy(zt->fsname, fsname);
+	sema_init(&(zt->z_sem_read), 1);
+	sema_init(&(zt->z_sem_write), 1);
+	zt->z_sem_real_read = &(zt->z_sem_read);
+	zt->z_sem_real_write = &(zt->z_sem_write);
+
+	if ((error = dsl_prop_get_integer(fsname, "write_bytes_sec", &rate, NULL)))
+		goto out;
+	zt->z_prop_write_bytes = rate;
+
+	if ((error = dsl_prop_get_integer(fsname, "read_bytes_sec", &rate, NULL)))
+		goto out;
+	zt->z_prop_read_bytes = rate;
+
+	if ((error = dsl_prop_get_integer(fsname, "write_iops_sec", &rate, NULL)))
+		goto out;
+	zt->z_prop_write_iops = rate;
+
+	if ((error = dsl_prop_get_integer(fsname, "read_iops_sec", &rate, NULL)))
+		goto out;
+	zt->z_prop_read_iops = rate;
+
+	if (zt->z_prop_write_bytes > 0 || zt->z_prop_read_bytes > 0
+			|| zt->z_prop_write_iops > 0 || zt->z_prop_read_iops > 0) {
+		zt->is_enabled = true;
+	} else {
+		zt->is_enabled = false;
+	}
+
+	// output io_serviced to kstat
+	(void) strcpy(io_serviced->read_bytes.name, "read_bytes");
+	io_serviced->read_bytes.data_type = KSTAT_DATA_UINT64;
+	io_serviced->read_bytes.value.ui64 = 0;
+
+	(void) strcpy(io_serviced->write_bytes.name, "write_bytes");
+	io_serviced->write_bytes.data_type = KSTAT_DATA_UINT64;
+	io_serviced->write_bytes.value.ui64 = 0;
+
+	(void) strcpy(io_serviced->read_iops.name, "read_iops");
+	io_serviced->read_iops.data_type = KSTAT_DATA_UINT64;
+	io_serviced->read_iops.value.ui64 = 0;
+
+	(void) strcpy(io_serviced->write_iops.name, "write_iops");
+	io_serviced->write_iops.data_type = KSTAT_DATA_UINT64;
+	io_serviced->write_iops.value.ui64 = 0;
+
+	(void) snprintf(stat_name, KSTAT_STRLEN, "io_serviced_%s_%s",
+			dp_name, ds_name);
+
+	ksp = kstat_create("zfs", 0, stat_name, "misc", KSTAT_TYPE_NAMED,
+			sizeof(io_serviced_t) / sizeof(kstat_named_t), KSTAT_FLAG_VIRTUAL);
+
+	zt->z_kstat = ksp;
+	zt->z_io_serviced = io_serviced;
+
+	if (ksp != NULL) {
+		ksp->ks_data = io_serviced;
+		kstat_install(ksp);
+	}
+
+	list_add(&(zt->list), &(zfs_throttle_list.list));
+
+	return (0);
+
+	out:
+		kmem_free(zt, sizeof (zfs_throttle_t));
+		return (error);
+}
+
+static int zfs_throttle_destroy_zt(const char *fsname, void *arg) {
+	struct list_head *pos, *tmp;
+	zfs_throttle_t *zt_next;
+	boolean_t del_pool = B_FALSE;
+	char prefix[MAXNAMELEN];
+
+	if (strchr(fsname, '/') == NULL) {
+		del_pool = TRUE;
+		(void) snprintf(prefix, MAXNAMELEN, "%s/", fsname);
+	}
+
+	list_for_each_safe(pos, tmp, &zfs_throttle_list.list)
+	{
+		zt_next = list_entry(pos, zfs_throttle_t, list);
+
+		if (strcmp(zt_next->fsname, fsname) == 0 ||
+				(del_pool && strstr(zt_next->fsname, prefix))) {
+			list_del(pos);
+
+			if (zt_next->z_kstat)
+				kstat_delete(zt_next->z_kstat);
+
+			if (zt_next->z_io_serviced)
+				kmem_free(zt_next->z_io_serviced, sizeof (io_serviced_t));
+
+			kmem_free(zt_next, sizeof (zfs_throttle_t));
+
+			if (!del_pool)
+				return (0);
+		}
+	}
+
+	return (0);
+}
+
 static int
 zfs_ioc_pool_import(zfs_cmd_t *zc)
 {
@@ -1553,6 +1679,10 @@ zfs_ioc_pool_import(zfs_cmd_t *zc)
 	nvlist_free(config);
 	nvlist_free(props);
 
+	error = dmu_objset_find(zc->zc_name,
+				zfs_throttle_create_zt, zc->zc_name,
+				DS_FIND_CHILDREN);
+
 	return (error);
 }
 
@@ -1562,6 +1692,8 @@ zfs_ioc_pool_export(zfs_cmd_t *zc)
 	int error;
 	boolean_t force = (boolean_t)zc->zc_cookie;
 	boolean_t hardforce = (boolean_t)zc->zc_guid;
+
+	zfs_throttle_destroy_zt(zc->zc_name, NULL);
 
 	zfs_log_history(zc);
 	error = spa_export(zc->zc_name, NULL, force, hardforce);
@@ -2429,6 +2561,91 @@ zfs_prop_set_special(const char *dsname, zprop_source_t source,
 		}
 		break;
 	}
+	case ZFS_PROP_WRITE_BYTES_SEC:
+	{
+	    zfs_throttle_t *zt = NULL;
+
+	    if (zfs_throttle_find_zt(dsname, &zt) != 0)
+	        break;
+
+        zt->z_prop_write_bytes = intval;
+        atomic_set(&(zt->z_real_write_bytes), 0);
+
+        if (zt->z_prop_write_bytes > 0 ||
+                zt->z_prop_read_bytes > 0 ||
+                zt->z_prop_write_iops > 0 ||
+                zt->z_prop_read_iops > 0) {
+            zt->is_enabled = true;
+        } else {
+            zt->is_enabled = false;
+        }
+        zt->z_write_timestamp = 0;
+	    break;
+	}
+    case ZFS_PROP_READ_BYTES_SEC:
+    {
+        zfs_throttle_t *zt = NULL;
+
+        if (zfs_throttle_find_zt(dsname, &zt) != 0)
+            break;
+
+        zt->z_prop_read_bytes = intval;
+        atomic_set(&(zt->z_real_read_bytes), 0);
+
+        if (zt->z_prop_write_bytes > 0 ||
+                zt->z_prop_read_bytes > 0 ||
+                zt->z_prop_write_iops > 0 ||
+                zt->z_prop_read_iops > 0) {
+            zt->is_enabled = true;
+        } else {
+            zt->is_enabled = false;
+        }
+        zt->z_read_timestamp = 0;
+        break;
+    }
+    case ZFS_PROP_WRITE_IOPS_SEC:
+    {
+        zfs_throttle_t *zt = NULL;
+
+        if (zfs_throttle_find_zt(dsname, &zt) != 0)
+            break;
+
+        zt->z_prop_write_iops = intval;
+        atomic_set(&(zt->z_real_write_iops), 0);
+
+        if (zt->z_prop_write_bytes > 0 ||
+                zt->z_prop_read_bytes > 0 ||
+                zt->z_prop_write_iops > 0 ||
+                zt->z_prop_read_iops > 0) {
+            zt->is_enabled = true;
+        } else {
+            zt->is_enabled = false;
+        }
+        zt->z_write_timestamp = 0;
+        break;
+    }
+    case ZFS_PROP_READ_IOPS_SEC:
+    {
+        zfs_throttle_t *zt = NULL;
+
+        if (zfs_throttle_find_zt(dsname, &zt) != 0)
+            break;
+
+        zt->z_prop_read_iops = intval;
+        atomic_set(&(zt->z_real_read_iops), 0);
+
+        if (zt->z_prop_write_bytes > 0 ||
+                zt->z_prop_read_bytes > 0 ||
+                zt->z_prop_write_iops > 0 ||
+                zt->z_prop_read_iops > 0) {
+            zt->is_enabled = true;
+        } else {
+            zt->is_enabled = false;
+        }
+        zt->z_read_timestamp = 0;
+        break;
+    }
+
 	default:
 		err = -1;
 	}
@@ -3260,6 +3477,12 @@ zfs_ioc_clone(const char *fsname, nvlist_t *innvl, nvlist_t *outnvl)
 		if (error != 0)
 			(void) dsl_destroy_head(fsname);
 	}
+
+	if (type == DMU_OST_ZFS) {
+	    error = zfs_throttle_create_zt(fsname, NULL);
+	    if (error)
+	        return (error);
+	}
 	return (error);
 }
 
@@ -3563,6 +3786,7 @@ static int
 zfs_ioc_destroy(zfs_cmd_t *zc)
 {
 	int err;
+	zfs_throttle_destroy_zt(zc->zc_name, NULL);
 
 	if (zc->zc_objset_type == DMU_OST_ZFS) {
 		err = zfs_unmount_snap(zc->zc_name);
@@ -3663,6 +3887,7 @@ zfs_ioc_rename(zfs_cmd_t *zc)
 {
 	boolean_t recursive = zc->zc_cookie & 1;
 	char *at;
+	int ret;
 
 	zc->zc_value[sizeof (zc->zc_value) - 1] = '\0';
 	if (dataset_namecheck(zc->zc_value, NULL, NULL) != 0 ||
@@ -3692,7 +3917,12 @@ zfs_ioc_rename(zfs_cmd_t *zc)
 
 		return (error);
 	} else {
-		return (dsl_dir_rename(zc->zc_name, zc->zc_value));
+		// recreate zfs throttle when rename a dataset
+		zfs_throttle_destroy_zt(zc->zc_name, NULL);
+		ret = dsl_dir_rename(zc->zc_name, zc->zc_value);
+		if (ret != 0)
+			return (ret);
+		return (zfs_throttle_create_zt(zc->zc_value, NULL));
 	}
 }
 
@@ -5968,6 +6198,23 @@ zfsdev_minor_alloc(void)
 	return (0);
 }
 
+int
+zfs_throttle_find_zt(const char *fsname, zfs_throttle_t **zt)
+{
+   struct list_head *pos;
+   zfs_throttle_t *zt_next;
+
+   list_for_each(pos, &zfs_throttle_list.list) {
+       zt_next = list_entry(pos, zfs_throttle_t, list);
+       if (strcmp(fsname, zt_next->fsname) == 0) {
+           *zt = zt_next;
+           return (0);
+       }
+   }
+
+   return (1);
+}
+
 static int
 zfsdev_state_init(struct file *filp)
 {
@@ -6336,6 +6583,8 @@ _init(void)
 	tsd_create(&zfs_fsyncer_key, NULL);
 	tsd_create(&rrw_tsd_key, rrw_tsd_destroy);
 	tsd_create(&zfs_allow_log_key, zfs_allow_log_destroy);
+
+	INIT_LIST_HEAD(&zfs_throttle_list.list);
 
 	printk(KERN_NOTICE "ZFS: Loaded module v%s-%s%s, "
 	    "ZFS pool version %s, ZFS filesystem version %s\n",

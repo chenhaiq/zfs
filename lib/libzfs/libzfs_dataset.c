@@ -2445,6 +2445,10 @@ zfs_prop_get(zfs_handle_t *zhp, zfs_prop_t prop, char *propbuf, size_t proplen,
 		}
 		break;
 
+	case ZFS_PROP_WRITE_BYTES_SEC:
+	case ZFS_PROP_READ_BYTES_SEC:
+	case ZFS_PROP_WRITE_IOPS_SEC:
+	case ZFS_PROP_READ_IOPS_SEC:
 	case ZFS_PROP_FILESYSTEM_LIMIT:
 	case ZFS_PROP_SNAPSHOT_LIMIT:
 	case ZFS_PROP_FILESYSTEM_COUNT:
